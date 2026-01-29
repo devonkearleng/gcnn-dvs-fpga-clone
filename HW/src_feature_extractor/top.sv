@@ -1,4 +1,4 @@
-`timescale 1ns / 1ps
+ `timescale 1ns / 1ps
 
 module top #(
     parameter int MAX_X_COORD	 = 128,
@@ -50,7 +50,7 @@ module top #(
     // u_out_serialize      -> Output feature map serialization 
 
     // String paths for weights memories
-    localparam string MEMORY_DIR_PATH = {graph_pkg::REPO_PATH, "/HW/mem/"};
+    localparam string MEMORY_DIR_PATH = {graph_pkg::REPO_PATH, "\\HW\\mem\\"};
 
     // Parameters for each convolutional layer
     localparam ZERO_POINT_CONV1 = 149;
