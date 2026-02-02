@@ -10,7 +10,7 @@ package graph_pkg;
     parameter MAX_EDGES	       = 29;                   // The maximum number of edges for single vertice (before graph rescaling - MaxPool)
     parameter TIME_WINDOW      = 200000;               // The time window for events accumulation for single graph representation (in us)
     parameter PRECISION        = 8;                    // Precision for weights and features in GCNN model (in bits)
-    parameter string REPO_PATH = "C:\\Users\\dkearlen\\Desktop\\undergraduate_thesis\\project_files\\ZCU102_current\\gcnn-dvs-fpga-clone";      // Path to repository (needed for memory init files)
+    parameter string REPO_PATH = "/home/devon/Desktop/gcnn-dvs-fpga-clone";      // Path to repository (needed for memory init files)
     
     ////////////////
     // DATA TYPES //
