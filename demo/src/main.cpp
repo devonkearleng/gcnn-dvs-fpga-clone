@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstring>
 #include "xgpiops.h"
 #include "xparameters.h"
 #include "platform.h"
@@ -13,12 +14,13 @@ XTime tEnd, tStart;
 static FIL fil;
 static FATFS fatfs;
 const TCHAR *Path = "0:/";
-char data_name[32] = "";
+char data_name[128] = "";
 char data_name_weights[32] = "mw.txt";
+char data_name_manifest[32] = "manifest.txt";
 char log_msg[256];
 int log_msg_nChars;
 int SDsetup(void);
-int loadFile(u8 *dataPtr, char *FileName, int nBytes);
+int loadFile(char *buffer, char *FileName, int nBytes, UINT *NumBytesRead);
 
 int ScuGicInterrupt_Init();
 void InterruptHandler(void *data);
@@ -29,14 +31,20 @@ char go;
 char mnist_class;
 char mnist_sample;
 u32 data_in = 0;
-int chars = 203078+700;
-char DestinationAddress[203078+700];
-u32 event_data[12279+50][4];
+const int MAX_EVENT_FILE_BYTES = 4000000;
+const int MAX_MANIFEST_BYTES = 2000000;
+const int MAX_EVENTS = 200000;
+char DestinationAddress[MAX_EVENT_FILE_BYTES + 1];
+char ManifestBuffer[MAX_MANIFEST_BYTES + 1];
+u32 event_data[MAX_EVENTS][4];
 int charsW = 156712;
 int weights_data[4096][10];
 int features[4096];
 int mod_cnt = 0;
 bool done = 0;
+volatile bool inference_done = false;
+volatile int predicted_class = -1;
+volatile int current_true_label = -1;
 
 int main()
 {
@@ -65,63 +73,87 @@ int main()
 	while(1)
 	{
 		int size = 12279+50;
+	std::cout << "Reading weights... ";
+	UINT bytesReadWeights = 0;
+	int data = loadFile(DestinationAddress, data_name_weights, charsW, &bytesReadWeights);
+	if (data != XST_SUCCESS)
+	{
+		std::cout << "failed!" << std::endl;
+		cleanup_platform();
+		return 1;
+	}
+	DestinationAddress[bytesReadWeights] = '\0';
+	int counter = 0;
+	char *saveptrW = NULL;
+	char *tokenW = strtok_r(DestinationAddress, " \n\r\t", &saveptrW);
+	while (tokenW != NULL)
+	{
+		weights_data[int(counter / 10)][int(counter % 10)] = std::__cxx11::stoi(tokenW);
+		counter = counter + 1;
+		tokenW = strtok_r(NULL, " \n\r\t", &saveptrW);
+	}
+	std::cout << "done!" << std::endl;
 
+	std::cout << "Reading manifest... ";
+	UINT bytesReadManifest = 0;
+	data = loadFile(ManifestBuffer, data_name_manifest, MAX_MANIFEST_BYTES, &bytesReadManifest);
+	if (data != XST_SUCCESS)
+	{
+		std::cout << "failed! (expected manifest.txt on SD root)" << std::endl;
+		cleanup_platform();
+		return 1;
+	}
+	ManifestBuffer[bytesReadManifest] = '\0';
+	std::cout << "done!" << std::endl;
+
+	int total = 0;
+	int correct = 0;
+
+	char *saveptrLine = NULL;
+	char *line = strtok_r(ManifestBuffer, "\r\n", &saveptrLine);
+
+	while (line != NULL)
 		std::cout << "--------------------------------------------------------------" << std::endl;
-		std::cout << "Input digit (0-9), otherwise quit: ";
-		std::cin >> mnist_class;
-		std::cout << mnist_class << std::endl;
-
-		if(int(mnist_class) >=48 && int(mnist_class) <= 57)
-		{
-			//NEW
-			std::cout << "--------------------------------------------------------------" << std::endl;
+		if (line[0] != '\0')
 			std::cout << "Input file number (0-9): ";
-			std::cin >> mnist_sample;
-			std::cout << mnist_sample << std::endl;
-
-			if(int(mnist_sample) >=48 && int(mnist_sample) <= 57)
-			{
-				std::string number = "";
-				number.append("m");
+			int true_label = -1;
+			if (sscanf(line, "%127s %d", data_name, &true_label) == 2)
 				number.append(std::__cxx11::to_string(int(mnist_class)-48));
-				number.append(std::__cxx11::to_string(int(mnist_sample)-48));
-				number.append(".txt");
+				std::cout << "--------------------------------------------------------------" << std::endl;
+				std::cout << "Processing " << data_name << " (label=" << true_label << ")..." << std::endl;
 
-				strcpy(data_name, number.c_str());
-
-				u8 dataPtr = 0;
-				std::cout << "Reading events... ";
-
-				int data = loadFile(&dataPtr, data_name, chars);
-				int counter = 0;
-
-				char* token = strtok(DestinationAddress, " \n");
-				while (token != NULL)
-				{
-					event_data[int(counter / 4)][int(counter % 4)] = std::__cxx11::stoi(token);
-					counter = counter + 1;
+				UINT bytesRead = 0;
+				data = loadFile(DestinationAddress, data_name, MAX_EVENT_FILE_BYTES, &bytesRead);
+				if (data != XST_SUCCESS)
 					token = strtok(NULL, " \n");
-				}
-				std::cout << "done!" << std::endl;
-
+					std::cout << "Failed to read sample file: " << data_name << std::endl;
+					line = strtok_r(NULL, "\r\n", &saveptrLine);
+					continue;
 				size = int(counter / 4);
-
+				DestinationAddress[bytesRead] = '\0';
 				dataPtr = 0;
-				std::cout << "Reading weights... ";
-				data = loadFile(&dataPtr, data_name_weights, charsW);
-				counter = 0;
-
-				char* tokenW = strtok(DestinationAddress, " \n");
-				while (tokenW != NULL)
+				int tokenCounter = 0;
+				char *saveptrE = NULL;
+				char *token = strtok_r(DestinationAddress, " \n\r\t", &saveptrE);
+				while (token != NULL && int(tokenCounter / 4) < MAX_EVENTS)
 				{
-					weights_data[int(counter / 10)][int(counter % 10)] = std::__cxx11::stoi(tokenW);
-					counter = counter + 1;
-					tokenW = strtok(NULL, " \n");
+					event_data[int(tokenCounter / 4)][int(tokenCounter % 4)] = std::__cxx11::stoi(token);
+					tokenCounter = tokenCounter + 1;
+					token = strtok_r(NULL, " \n\r\t", &saveptrE);
 				}
-				std::cout << "done!" << std::endl;
 
-				unsigned int wait = 0;
-				u32 timestamp = 0;
+				int size = int(tokenCounter / 4);
+				if (size <= 0)
+				{
+					std::cout << "No events found in file: " << data_name << std::endl;
+					line = strtok_r(NULL, "\r\n", &saveptrLine);
+					continue;
+				}
+				data = loadFile(&dataPtr, data_name_weights, charsW);
+				inference_done = false;
+				predicted_class = -1;
+				current_true_label = true_label;
+				mod_cnt = 0;
 				u32 next_timestamp = 0;
 				u32 x = 0;
 				u32 y = 0;
@@ -149,18 +181,44 @@ int main()
 					if(timestamp > 200000)
 						break;
 				}
+
+				int timeout_us = 5000000;
+				while (!inference_done && timeout_us > 0)
+				{
+					usleep(1000);
+					timeout_us -= 1000;
+				}
+
+				if (!inference_done)
+				{
+					std::cout << "Timed out waiting for inference result." << std::endl;
+				}
+				else
+				{
+					total += 1;
+					if (predicted_class == true_label)
+					{
+						correct += 1;
+					}
+					std::cout << "Running accuracy: " << correct << "/" << total << std::endl;
+				}
 			}
 		}
-
-		else
-		{
-			std::cout << "Exit!" << std::endl;
-			cleanup_platform();
-			return 0;
-		}
-
-		usleep(10000);
+		line = strtok_r(NULL, "\r\n", &saveptrLine);
 	}
+
+	std::cout << "==============================================================" << std::endl;
+	std::cout << "Dataset inference finished." << std::endl;
+	std::cout << "Total samples: " << total << std::endl;
+	std::cout << "Correct: " << correct << std::endl;
+	if (total > 0)
+	{
+		float accuracy = 100.0f * float(correct) / float(total);
+		std::cout << "Accuracy: " << accuracy << "%" << std::endl;
+	}
+
+	cleanup_platform();
+	return 0;
 }
 
 int ScuGicInterrupt_Init()
@@ -244,7 +302,9 @@ void InterruptHandler(void *data) {
 			}
 		}
 		index = 9-index;
-		std::cout << "True class: " << mnist_class << ", predicted class: " << index << std::endl;
+		predicted_class = index;
+		inference_done = true;
+		std::cout << "True class: " << current_true_label << ", predicted class: " << index << std::endl;
 	}
 }
 
@@ -260,10 +320,10 @@ int SDsetup(void)
 	return XST_SUCCESS;
 }
 
-int loadFile(u8 *dataPtr, char *FileName, int nBytes)
+int loadFile(char *buffer, char *FileName, int nBytes, UINT *NumBytesRead)
 {
 	FRESULT Res;
-	UINT NumBytesRead;
+	UINT localNumBytesRead = 0;
 
 	Res = f_open(&fil, FileName, FA_OPEN_EXISTING | FA_READ);
 	if (Res)
@@ -277,10 +337,15 @@ int loadFile(u8 *dataPtr, char *FileName, int nBytes)
 		return XST_FAILURE;
 	}
 
-	Res = f_read(&fil, (void*)DestinationAddress, nBytes, &NumBytesRead);
+	Res = f_read(&fil, (void*)buffer, nBytes, &localNumBytesRead);
 	if (Res)
 	{
 		return XST_FAILURE;
+	}
+
+	if (NumBytesRead != NULL)
+	{
+		*NumBytesRead = localNumBytesRead;
 	}
 
 	Res = f_sync(&fil);

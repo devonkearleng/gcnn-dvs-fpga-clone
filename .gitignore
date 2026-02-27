@@ -1,0 +1,33 @@
+# Runtime/exported dataset artifacts
+/sd_export/
+
+# Generated hardware build artifacts
+/HW/final_demo/
+/HW/synth/
+
+# Vivado / Vitis generated files
+.Xil/
+*.jou
+*.str
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+
+# Local editor/environment files
+.venv/
+.vscode/
+
+# Python cache artifacts (outside SW)
+__pycache__/
+*.py[cod]
+
+# OS/editor temp files
+.DS_Store
+*.swp
+*.swo
+
+# Local logs
+*.log
