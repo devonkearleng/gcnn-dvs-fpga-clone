@@ -21,7 +21,13 @@ static constexpr int MAX_MANIFEST_BYTES = 2000000;
 static constexpr int MAX_WEIGHT_FILE_BYTES = 300000;
 static constexpr int MAX_BIAS_FILE_BYTES = 4096;
 static constexpr int MAX_EVENTS = 200000;
-static constexpr u32 MAX_TIMESTAMP_US = 200000;
+// Training used time_window=100000 (100ms) to filter and normalize events.
+// Hardware TIME_WINDOW=200000, so we scale timestamps x2 before sending:
+//   t_norm_fpga = (t*2 * 128) / 200000 = t * 128 / 100000  (matches training)
+// Only events with t < TRAIN_TIME_WINDOW_US are sent (matching training's filter).
+static constexpr u32 TRAIN_TIME_WINDOW_US = 100000;
+static constexpr u32 HW_TIME_WINDOW_US    = 200000; // TIME_WINDOW in normalize.sv
+static constexpr u32 MAX_TIMESTAMP_US     = TRAIN_TIME_WINDOW_US;
 
 XTime tStart, tEnd;
 static FIL fil;
@@ -229,20 +235,22 @@ int main()
                 next_timestamp = timestamp;
             }
 
+            if (timestamp >= TRAIN_TIME_WINDOW_US)
+            {
+                break;
+            }
+
             u32 valid = 1;
             u32 data_to_send1 = valid + 2 * polarity + 4 * y + 256 * 4 * x;
-            u32 data_to_send2 = timestamp;
+            // Scale timestamp x2 so hardware t_norm matches training:
+            // t_norm = (t*2 * 128) / HW_TIME_WINDOW_US = t * 128 / TRAIN_TIME_WINDOW_US
+            u32 data_to_send2 = timestamp * 2;
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send1);
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send2);
             event_count += 1;
 
             u32 wait = (next_timestamp >= timestamp) ? (next_timestamp - timestamp) : 0;
             usleep(wait);
-
-            if (timestamp > MAX_TIMESTAMP_US)
-            {
-                break;
-            }
         }
 
         if (event_count <= 0)
@@ -253,14 +261,12 @@ int main()
         }
         std::cout << "[Sample " << sample_idx << "] Parsed/Sent events=" << event_count << std::endl;
 
-        // Send a sentinel event with timestamp > TIME_WINDOW (200000) to trigger
-        // the FPGA context reset and output serialization. The normalize.sv module
-        // only fires reset_context (which starts the sync pipeline) when timestamp
-        // > TIME_WINDOW. sd_export samples never exceed ~199996us, so without this
-        // the sync pipeline never runs and inference_done is never set.
+        // Send a sentinel event with scaled timestamp > HW_TIME_WINDOW_US (200000)
+        // to trigger the FPGA context reset and output serialization.
+        // TRAIN_TIME_WINDOW_US * 2 + 1 = 200001 > 200000 = HW_TIME_WINDOW_US.
         {
             u32 sentinel_data1 = 1; // valid=1, x=0, y=0, polarity=0
-            u32 sentinel_data2 = MAX_TIMESTAMP_US + 1; // > TIME_WINDOW (200000)
+            u32 sentinel_data2 = TRAIN_TIME_WINDOW_US * 2 + 1; // 200001 > HW_TIME_WINDOW_US
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, sentinel_data1);
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, sentinel_data2);
         }
