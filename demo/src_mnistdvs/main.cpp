@@ -25,6 +25,8 @@ static constexpr int MAX_EVENTS = 200000;
 // Hardware TIME_WINDOW=200000, so we scale timestamps x2 before sending:
 //   t_norm_fpga = (t*2 * 128) / 200000 = t * 128 / 100000  (matches training)
 // Only events with t < TRAIN_TIME_WINDOW_US are sent (matching training's filter).
+static constexpr bool ENABLE_SAMPLE_DEBUG = true;
+static constexpr int DEBUG_PRINT_LIMIT = 30;
 static constexpr u32 TRAIN_TIME_WINDOW_US = 100000;
 static constexpr u32 HW_TIME_WINDOW_US    = 200000; // TIME_WINDOW in normalize.sv
 static constexpr u32 MAX_TIMESTAMP_US     = TRAIN_TIME_WINDOW_US;
@@ -53,6 +55,7 @@ int mod_cnt = 0;
 volatile bool inference_done = false;
 volatile int predicted_class = -1;
 volatile int current_true_label = -1;
+volatile int last_output_vals[NUM_CLASSES] = {0};
 
 int SDsetup(void);
 int loadFile(char *buffer, char *FileName, int nBytes, UINT *NumBytesRead);
@@ -219,6 +222,8 @@ int main()
         int event_count = 0;
         int parsed_events = tokenCounter / 4;
         u32 next_timestamp = 0;
+        u32 last_sent_timestamp = 0;
+        u32 last_sent_scaled_timestamp = 0;
         for (int i = 0; i < parsed_events; i++)
         {
             u32 x = event_data[i][0];
@@ -248,6 +253,8 @@ int main()
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send1);
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send2);
             event_count += 1;
+            last_sent_timestamp = timestamp;
+            last_sent_scaled_timestamp = data_to_send2;
 
             u32 wait = (next_timestamp >= timestamp) ? (next_timestamp - timestamp) : 0;
             usleep(wait);
@@ -295,6 +302,56 @@ int main()
         }
         std::cout << "[Sample " << sample_idx << "] Inference OK: pred="
                   << predicted_class << ", true=" << true_label << std::endl;
+
+        if (ENABLE_SAMPLE_DEBUG && sample_idx <= DEBUG_PRINT_LIMIT)
+        {
+            int score_snapshot[NUM_CLASSES];
+            for (int c = 0; c < NUM_CLASSES; c++)
+            {
+                score_snapshot[c] = last_output_vals[c];
+            }
+
+            int best_idx = 0;
+            int second_idx = 0;
+            if (NUM_CLASSES > 1 && score_snapshot[1] > score_snapshot[0])
+            {
+                best_idx = 1;
+                second_idx = 0;
+            }
+            for (int c = 2; c < NUM_CLASSES; c++)
+            {
+                if (score_snapshot[c] > score_snapshot[best_idx])
+                {
+                    second_idx = best_idx;
+                    best_idx = c;
+                }
+                else if (score_snapshot[c] > score_snapshot[second_idx] || second_idx == best_idx)
+                {
+                    second_idx = c;
+                }
+            }
+
+            int mapped_best_idx = REVERSE_CLASS_INDEX ? ((NUM_CLASSES - 1) - best_idx) : best_idx;
+            int mapped_second_idx = REVERSE_CLASS_INDEX ? ((NUM_CLASSES - 1) - second_idx) : second_idx;
+            int margin = score_snapshot[best_idx] - score_snapshot[second_idx];
+
+            std::cout << "[Debug sample " << sample_idx << "] events=" << event_count
+                      << ", t_last=" << last_sent_timestamp
+                      << ", t_last_scaled=" << last_sent_scaled_timestamp
+                      << ", top1=" << mapped_best_idx
+                      << ", top2=" << mapped_second_idx
+                      << ", margin=" << margin
+                      << ", pred=" << predicted_class
+                      << ", true=" << true_label << std::endl;
+
+            std::cout << "[Debug sample " << sample_idx << "] logits=";
+            for (int c = 0; c < NUM_CLASSES; c++)
+            {
+                int mapped_c = REVERSE_CLASS_INDEX ? ((NUM_CLASSES - 1) - c) : c;
+                std::cout << " " << mapped_c << ":" << score_snapshot[c];
+            }
+            std::cout << std::endl;
+        }
 
         if ((total % 500) == 0)
         {
@@ -410,6 +467,7 @@ void InterruptHandler(void *data)
                 sum += weights_data[w][out] * features[w];
             }
             output_vals[out] = sum;
+            last_output_vals[out] = sum;
         }
 
         XTime_GetTime(&tEnd);
