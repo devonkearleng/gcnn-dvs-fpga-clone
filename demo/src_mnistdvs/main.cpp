@@ -251,6 +251,18 @@ int main()
         }
         std::cout << "[Sample " << sample_idx << "] Parsed/Sent events=" << event_count << std::endl;
 
+        // Send a sentinel event with timestamp > TIME_WINDOW (200000) to trigger
+        // the FPGA context reset and output serialization. The normalize.sv module
+        // only fires reset_context (which starts the sync pipeline) when timestamp
+        // > TIME_WINDOW. sd_export samples never exceed ~199996us, so without this
+        // the sync pipeline never runs and inference_done is never set.
+        {
+            u32 sentinel_data1 = 1; // valid=1, x=0, y=0, polarity=0
+            u32 sentinel_data2 = MAX_TIMESTAMP_US + 1; // > TIME_WINDOW (200000)
+            Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, sentinel_data1);
+            Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, sentinel_data2);
+        }
+
         int timeout_us = 5000000;
         while (!inference_done && timeout_us > 0)
         {
