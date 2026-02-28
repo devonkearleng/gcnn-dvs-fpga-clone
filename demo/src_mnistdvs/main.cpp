@@ -154,6 +154,8 @@ int main()
     int total = 0;
     int correct = 0;
     int timed_out = 0;
+    int class_correct[NUM_CLASSES] = {0};
+    int class_total[NUM_CLASSES] = {0};
 
     XTime batchStart, batchEnd;
     XTime_GetTime(&batchStart);
@@ -279,9 +281,11 @@ int main()
         }
 
         total += 1;
+        class_total[true_label] += 1;
         if (predicted_class == true_label)
         {
             correct += 1;
+            class_correct[true_label] += 1;
         }
         std::cout << "[Sample " << sample_idx << "] Inference OK: pred="
                   << predicted_class << ", true=" << true_label << std::endl;
@@ -306,6 +310,19 @@ int main()
     {
         float accuracy = 100.0f * float(correct) / float(total);
         std::cout << "Accuracy: " << accuracy << "%" << std::endl;
+    }
+
+    std::cout << std::endl;
+    std::cout << "Per-class results:" << std::endl;
+    for (int c = 0; c < NUM_CLASSES; c++)
+    {
+        if (class_total[c] > 0)
+        {
+            float class_acc = 100.0f * float(class_correct[c]) / float(class_total[c]);
+            std::cout << "  Class " << c << ": "
+                      << class_correct[c] << "/" << class_total[c]
+                      << " (" << class_acc << "%)" << std::endl;
+        }
     }
 
     double elapsed_s = 0.0;
