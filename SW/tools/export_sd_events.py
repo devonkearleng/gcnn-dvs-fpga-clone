@@ -305,7 +305,7 @@ def export_mnistdvs(items: Iterable[Tuple[str, int]], out_dir: str, time_window_
             events = preprocess_mnistdvs_events(events, rng=rng)
         events = events[events[:, 2] < time_window_us]
 
-        out_name = f"sample_{idx:06d}.txt"
+        out_name = f"s{idx:07d}.txt"
         out_path = os.path.join(out_dir, out_name)
         write_events_txt(out_path, events)
         output_files.append(out_name)
