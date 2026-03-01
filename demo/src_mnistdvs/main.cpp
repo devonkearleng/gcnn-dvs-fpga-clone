@@ -21,15 +21,19 @@ static constexpr int MAX_MANIFEST_BYTES = 2000000;
 static constexpr int MAX_WEIGHT_FILE_BYTES = 300000;
 static constexpr int MAX_BIAS_FILE_BYTES = 4096;
 static constexpr int MAX_EVENTS = 200000;
-// Training used time_window=100000 (100ms) to filter and normalize events.
-// Hardware TIME_WINDOW=200000, so we scale timestamps x2 before sending:
-//   t_norm_fpga = (t*2 * 128) / 200000 = t * 128 / 100000  (matches training)
-// Only events with t < TRAIN_TIME_WINDOW_US are sent (matching training's filter).
+// Hardware TIME_WINDOW=200000 (graph_pkg::TIME_WINDOW in mnist_pkg.sv).
+// QAT model was trained with Python time_window=100000 (100ms):
+//   Python t_norm = t * 128 / 100000
+// Hardware t_norm = t * 128 / 200000 = half of training → MISMATCH.
+//
+// Fix: send scaled timestamp (t * 2) for events with t < TRAIN_TIME_WINDOW_US.
+//   Hardware t_norm = (t*2) * 128 / 200000 = t * 128 / 100000  ← matches training!
+// Sentinel must still be > HW_TIME_WINDOW_US to trigger the context reset.
 static constexpr bool ENABLE_SAMPLE_DEBUG = true;
 static constexpr int DEBUG_PRINT_LIMIT = 30;
-static constexpr u32 TRAIN_TIME_WINDOW_US = 100000;
-static constexpr u32 HW_TIME_WINDOW_US    = 200000; // TIME_WINDOW in normalize.sv
-static constexpr u32 MAX_TIMESTAMP_US     = TRAIN_TIME_WINDOW_US;
+static constexpr u32 HW_TIME_WINDOW_US   = 200000; // graph_pkg::TIME_WINDOW (hardware)
+static constexpr u32 TRAIN_TIME_WINDOW_US = 100000; // QAT training window (mnistdvs.py)
+static constexpr u32 MAX_TIMESTAMP_US    = TRAIN_TIME_WINDOW_US;
 
 XTime tStart, tEnd;
 static FIL fil;
@@ -223,7 +227,6 @@ int main()
         int parsed_events = tokenCounter / 4;
         u32 next_timestamp = 0;
         u32 last_sent_timestamp = 0;
-        u32 last_sent_scaled_timestamp = 0;
         for (int i = 0; i < parsed_events; i++)
         {
             u32 x = event_data[i][0];
@@ -242,19 +245,17 @@ int main()
 
             if (timestamp >= TRAIN_TIME_WINDOW_US)
             {
-                break;
+                break; // only use first 100ms, matching QAT training window
             }
 
             u32 valid = 1;
             u32 data_to_send1 = valid + 2 * polarity + 4 * y + 256 * 4 * x;
-            // Scale timestamp x2 so hardware t_norm matches training:
-            // t_norm = (t*2 * 128) / HW_TIME_WINDOW_US = t * 128 / TRAIN_TIME_WINDOW_US
+            // Scale t*2 so hardware t_norm = (t*2)*128/200000 = t*128/100000 (matches training)
             u32 data_to_send2 = timestamp * 2;
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send1);
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send2);
             event_count += 1;
             last_sent_timestamp = timestamp;
-            last_sent_scaled_timestamp = data_to_send2;
 
             u32 wait = (next_timestamp >= timestamp) ? (next_timestamp - timestamp) : 0;
             usleep(wait);
@@ -268,12 +269,11 @@ int main()
         }
         std::cout << "[Sample " << sample_idx << "] Parsed/Sent events=" << event_count << std::endl;
 
-        // Send a sentinel event with scaled timestamp > HW_TIME_WINDOW_US (200000)
+        // Send a sentinel event with timestamp > HW_TIME_WINDOW_US (200000)
         // to trigger the FPGA context reset and output serialization.
-        // TRAIN_TIME_WINDOW_US * 2 + 1 = 200001 > 200000 = HW_TIME_WINDOW_US.
         {
             u32 sentinel_data1 = 1; // valid=1, x=0, y=0, polarity=0
-            u32 sentinel_data2 = TRAIN_TIME_WINDOW_US * 2 + 1; // 200001 > HW_TIME_WINDOW_US
+            u32 sentinel_data2 = HW_TIME_WINDOW_US + 1; // 200001 > TIME_WINDOW=200000
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, sentinel_data1);
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, sentinel_data2);
         }
@@ -337,7 +337,6 @@ int main()
 
             std::cout << "[Debug sample " << sample_idx << "] events=" << event_count
                       << ", t_last=" << last_sent_timestamp
-                      << ", t_last_scaled=" << last_sent_scaled_timestamp
                       << ", top1=" << mapped_best_idx
                       << ", top2=" << mapped_second_idx
                       << ", margin=" << margin
