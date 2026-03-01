@@ -444,7 +444,15 @@ void InterruptHandler(void *data)
     for (int i = 0; i < 1024; i++)
     {
         data_in = Xil_In32(XPAR_AXI_BRAM_CTRL_1_S_AXI_BASEADDR + 4 * i);
-        features[((i / 64) % 4) * 1024 + (i / 256) * 256 + i % 64 + mod_cnt * 64] = (int)data_in - ZERO_POINT_IN;
+        // Empty spatial nodes are zeroed by feature_memory and clipped to 1 by out_serialize
+        // (ZERO_POINT=1), so they arrive here as 1. Python initialises empty nodes to
+        // observer_in.zero_point (213) and subtracts it, giving 0 contribution.
+        // Clamping to 0 reproduces the same behaviour without a hardware rebuild.
+        {
+            int raw = (int)data_in;
+            features[((i / 64) % 4) * 1024 + (i / 256) * 256 + i % 64 + mod_cnt * 64] =
+                (raw > ZERO_POINT_IN) ? (raw - ZERO_POINT_IN) : 0;
+        }
     }
     mod_cnt += 1;
 
