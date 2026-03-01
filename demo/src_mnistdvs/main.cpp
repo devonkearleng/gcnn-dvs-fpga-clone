@@ -21,19 +21,10 @@ static constexpr int MAX_MANIFEST_BYTES = 2000000;
 static constexpr int MAX_WEIGHT_FILE_BYTES = 300000;
 static constexpr int MAX_BIAS_FILE_BYTES = 4096;
 static constexpr int MAX_EVENTS = 200000;
-// Hardware TIME_WINDOW=200000 (graph_pkg::TIME_WINDOW in mnist_pkg.sv).
-// QAT model was trained with Python time_window=100000 (100ms):
-//   Python t_norm = t * 128 / 100000
-// Hardware t_norm = t * 128 / 200000 = half of training → MISMATCH.
-//
-// Fix: send scaled timestamp (t * 2) for events with t < TRAIN_TIME_WINDOW_US.
-//   Hardware t_norm = (t*2) * 128 / 200000 = t * 128 / 100000  ← matches training!
-// Sentinel must still be > HW_TIME_WINDOW_US to trigger the context reset.
 static constexpr bool ENABLE_SAMPLE_DEBUG = true;
 static constexpr int DEBUG_PRINT_LIMIT = 30;
-static constexpr u32 HW_TIME_WINDOW_US   = 200000; // graph_pkg::TIME_WINDOW (hardware)
-static constexpr u32 TRAIN_TIME_WINDOW_US = 100000; // QAT training window (mnistdvs.py)
-static constexpr u32 MAX_TIMESTAMP_US    = TRAIN_TIME_WINDOW_US;
+static constexpr u32 HW_TIME_WINDOW_US = 200000; // graph_pkg::TIME_WINDOW (hardware)
+static constexpr u32 MAX_TIMESTAMP_US  = HW_TIME_WINDOW_US; // send all 200ms events
 
 XTime tStart, tEnd;
 static FIL fil;
@@ -243,15 +234,9 @@ int main()
                 next_timestamp = timestamp;
             }
 
-            if (timestamp >= TRAIN_TIME_WINDOW_US)
-            {
-                break; // only use first 100ms, matching QAT training window
-            }
-
             u32 valid = 1;
             u32 data_to_send1 = valid + 2 * polarity + 4 * y + 256 * 4 * x;
-            // Scale t*2 so hardware t_norm = (t*2)*128/200000 = t*128/100000 (matches training)
-            u32 data_to_send2 = timestamp * 2;
+            u32 data_to_send2 = timestamp;
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send1);
             Xil_Out32(XPAR_AXI_BRAM_CTRL_0_S_AXI_BASEADDR, data_to_send2);
             event_count += 1;
@@ -259,6 +244,11 @@ int main()
 
             u32 wait = (next_timestamp >= timestamp) ? (next_timestamp - timestamp) : 0;
             usleep(wait);
+
+            if (timestamp > MAX_TIMESTAMP_US)
+            {
+                break; // sentinel in sample file (t > 200000) already sent above
+            }
         }
 
         if (event_count <= 0)

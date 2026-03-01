@@ -209,9 +209,84 @@ def write_events_txt(out_path: str, events: np.ndarray) -> None:
             f.write(f"{int(x)} {int(y)} {int(t)} {int(p)}\n")
 
 
-def export_mnistdvs(items: Iterable[Tuple[str, int]], out_dir: str, time_window_us: int, max_samples: int) -> Tuple[List[str], List[int]]:
+def preprocess_mnistdvs_events(
+    events: np.ndarray,
+    remove_75hz: bool = True,
+    stabilize: bool = True,
+    remove_polarity: bool = True,
+    noise_factor: float = 2.0,
+    rng: np.random.Generator = None,
+) -> np.ndarray:
+    """Replicate the IMSE-CNM process_mnist.m MATLAB preprocessing in Python.
+
+    events: (N, 4) int32 array with columns [x_out, y_out, t_us, p_out]
+        where x_out = 127 - y_raw  (col 0, sent to HW as x)
+              y_out = 127 - x_raw  (col 1, sent to HW as y) = x_CIN
+              t_us                 (col 2, raw microsecond timestamp)
+              p_out = 1 - p_raw   (col 3)
+
+    Coordinate identities (from mat2dat.m inverse):
+        x_CIN = 127 - x_raw = y_out (col 1)
+        y_CIN = y_raw        = 127 - x_out (127 - col 0)
+
+    Stabilisation in output-space:
+        tx_new = tx + yc - 63   (tx = col 0 = 127 - y_CIN)
+        ty_new = ty - xc + 63   (ty = col 1 = x_CIN)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    events = events.copy().astype(np.float64)
+
+    # --- a) Remove 75 Hz LCD harmonic ---
+    if remove_75hz and len(events) > 1:
+        t = events[:, 2]
+        dii = np.diff(t)
+        mean_dii = float(np.mean(dii))
+        std_dii = float(np.std(dii))
+        n = len(t)
+        ii2 = np.cumsum(mean_dii + noise_factor * std_dii * rng.standard_normal(n))
+        ii2 -= np.min(ii2)
+        ii_max = np.max(t)
+        ii2_max = np.max(ii2)
+        if ii2_max > 0:
+            ii2 = np.round(ii2 * ii_max / ii2_max)
+        events[:, 2] = np.sort(ii2)
+
+    # --- b) Stabilise digit at centre (63, 63) ---
+    if stabilize and len(events) > 0:
+        TT = 0.2982
+        Trampy = TT * 1e6       # 298 200 µs
+        Trampx = 2.0 * TT * 1e6  # 596 400 µs
+        DY, DX = 5.0, 10.0
+        Ymin, Xmin = 58.0, 58.0
+
+        t = events[:, 2]
+        yc0 = np.abs(np.mod(t, 2.0 * Trampy) - Trampy) / Trampy * DY + Ymin
+        yc = 127.0 - np.round(yc0)   # centre y in sensor coords
+        xc0 = np.abs(np.mod(t + 1.5 * Trampx, 2.0 * Trampx) - Trampx) / Trampx * DX + Xmin
+        xc = 127.0 - np.round(xc0)   # centre x in sensor coords
+
+        # Apply shift in output-space coordinates
+        tx_new = events[:, 0] + yc - 63.0
+        ty_new = events[:, 1] - xc + 63.0
+
+        mask = (tx_new >= 0) & (tx_new <= 127) & (ty_new >= 0) & (ty_new <= 127)
+        events[:, 0] = tx_new
+        events[:, 1] = ty_new
+        events = events[mask]
+
+    # --- c) Remove polarity (set all p_out = 1) ---
+    if remove_polarity and len(events) > 0:
+        events[:, 3] = 1.0
+
+    return events.astype(np.int32)
+
+
+def export_mnistdvs(items: Iterable[Tuple[str, int]], out_dir: str, time_window_us: int, max_samples: int, preprocess: bool = False, preprocess_seed: int = None) -> Tuple[List[str], List[int]]:
     output_files = []
     labels = []
+    rng = np.random.default_rng(preprocess_seed) if preprocess else None
     for idx, (path, label) in enumerate(items):
         if max_samples is not None and idx >= max_samples:
             break
@@ -226,6 +301,8 @@ def export_mnistdvs(items: Iterable[Tuple[str, int]], out_dir: str, time_window_
                 polarity_shift=None,
             )
         events = np.stack((127 - y, 127 - x, t, 1 - p.astype(int)), axis=1)
+        if preprocess:
+            events = preprocess_mnistdvs_events(events, rng=rng)
         events = events[events[:, 2] < time_window_us]
 
         out_name = f"sample_{idx:06d}.txt"
@@ -312,6 +389,13 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--mnist-layout", type=str, default="standard", choices=["standard", "grabbed"])
     parser.add_argument("--mnist-scale", type=str, default="all", choices=["all", "4", "8", "16"])
+    parser.add_argument("--preprocess-mnist", action="store_true",
+                        help="Apply IMSE-CNM process_mnist.m preprocessing: "
+                             "remove 75 Hz LCD harmonic, stabilise digit at centre, "
+                             "remove polarity (all events set to p=1). "
+                             "Recommended when exporting grabbed MNIST-DVS data.")
+    parser.add_argument("--preprocess-seed", type=int, default=None,
+                        help="Random seed for the 75 Hz harmonic removal step (reproducibility).")
 
     args = parser.parse_args()
 
@@ -329,7 +413,9 @@ def main() -> None:
                 items = iter_mnistdvs_files_standard(args.data_dir, split)
             else:
                 items = iter_mnistdvs_files_grabbed(args.data_dir, args.mnist_scale)
-            files, labels = export_mnistdvs(items, out_dir, args.time_window_us, args.max_samples)
+            files, labels = export_mnistdvs(items, out_dir, args.time_window_us, args.max_samples,
+                                            preprocess=args.preprocess_mnist,
+                                            preprocess_seed=args.preprocess_seed)
         elif args.dataset == "cifar10":
             items = iter_cifar10_files(args.data_dir, split)
             files, labels = export_cifar10(items, out_dir, args.time_window_us, args.max_samples)
